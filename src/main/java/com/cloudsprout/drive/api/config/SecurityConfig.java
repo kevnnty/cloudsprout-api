@@ -1,51 +1,111 @@
 package com.cloudsprout.drive.api.config;
 
-import com.cloudsprout.drive.api.security.JwtAuthenticationFilter;
+import static org.springframework.security.config.http.SessionCreationPolicy.STATELESS;
+
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.security.authentication.AuthenticationManager;
-import org.springframework.security.authentication.ProviderManager;
+import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
+import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
-import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.access.AccessDeniedHandler;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+
+import com.cloudsprout.drive.api.payload.ApiResponse;
+import com.cloudsprout.drive.api.security.CustomUserDetailsService;
+import com.cloudsprout.drive.api.security.JwtAuthenticationEntryPoint;
+import com.cloudsprout.drive.api.security.JwtAuthenticationFilter;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import jakarta.servlet.ServletOutputStream;
+import jakarta.servlet.http.HttpServletResponse;
+import lombok.RequiredArgsConstructor;
 
 @Configuration
 @EnableWebSecurity
+@EnableMethodSecurity
+@RequiredArgsConstructor
 public class SecurityConfig {
+  private final JwtAuthenticationEntryPoint unauthorizedHandler;
+  private final CustomUserDetailsService userService;
 
-  private final JwtAuthenticationFilter jwtAuthenticationFilter;
-  private final UserDetailsService userDetailsService;
-  private final PasswordEncoder passwordEncoder;
+  private static final String[] AUTH_WHITELIST = { "/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**",
+      "/api/v1/auth/**", "/api/v1/users/**" };
 
-  public SecurityConfig(JwtAuthenticationFilter jwtAuthenticationFilter, UserDetailsService userDetailsService,
-      PasswordEncoder passwordEncoder) {
-    this.jwtAuthenticationFilter = jwtAuthenticationFilter;
-    this.userDetailsService = userDetailsService;
-    this.passwordEncoder = passwordEncoder;
+  @Bean
+  public AccessDeniedHandler accessDeniedHandler() {
+    return (request, response, ex) -> {
+      response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+      response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+      ServletOutputStream out = response.getOutputStream();
+      new ObjectMapper().writeValue(out, new ApiResponse<>(
+          false,
+          "You are not allowed to access this resource.",
+          HttpStatus.FORBIDDEN,
+          null,
+          null));
+
+      out.flush();
+    };
   }
 
   @Bean
-  public AuthenticationManager authenticationManager() {
-    DaoAuthenticationProvider authProvider = new DaoAuthenticationProvider();
-    authProvider.setUserDetailsService(userDetailsService);
-    authProvider.setPasswordEncoder(passwordEncoder);
-    return new ProviderManager(authProvider);
+  public CorsConfigurationSource corsConfigurationSource() {
+    CorsConfiguration configuration = new CorsConfiguration();
+    configuration.addAllowedOrigin("*");
+    configuration.addAllowedMethod("*");
+    configuration.addAllowedHeader("*");
+
+    UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+    source.registerCorsConfiguration("/**", configuration);
+    return source;
   }
 
   @Bean
   public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
-    http
-        .csrf(csrf -> csrf.disable())
-        .authorizeHttpRequests(auth -> auth
-            .requestMatchers("/api/auth/**").permitAll() // Allow public access to auth endpoints
-            .anyRequest().authenticated() // All other requests need authentication
-        )
-        .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
-
+    http.cors(cors -> cors.configurationSource(corsConfigurationSource())).csrf(AbstractHttpConfigurer::disable)
+        .authorizeHttpRequests(
+            request -> request.requestMatchers(AUTH_WHITELIST).permitAll().anyRequest().authenticated())
+        .exceptionHandling(exception -> exception.authenticationEntryPoint(unauthorizedHandler)
+            .accessDeniedHandler(accessDeniedHandler()))
+        .sessionManagement(manager -> manager.sessionCreationPolicy(STATELESS))
+        .authenticationProvider(authenticationProvider())
+        .addFilterBefore(jwtAuthenticationFilter(), UsernamePasswordAuthenticationFilter.class);
     return http.build();
+  }
+
+  @Bean
+  public JwtAuthenticationFilter jwtAuthenticationFilter() {
+    return new JwtAuthenticationFilter();
+  }
+
+  @Bean
+  public PasswordEncoder passwordEncoder() {
+    return new BCryptPasswordEncoder();
+  }
+
+  @Bean
+  public AuthenticationProvider authenticationProvider() {
+    DaoAuthenticationProvider authProvider = new DaoAuthenticationProvider();
+    authProvider.setUserDetailsService(userService);
+    authProvider.setPasswordEncoder(passwordEncoder());
+    return authProvider;
+  }
+
+  @Bean
+  public AuthenticationManager authenticationManager(AuthenticationConfiguration config) throws Exception {
+    return config.getAuthenticationManager();
   }
 }
